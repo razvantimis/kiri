@@ -267,7 +267,7 @@ fn start(use_context: bool) -> io::Result<()> {
         if let Some(e) = String::from_utf8_lossy(&pulled.body).lines().filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok()).find_map(|v| v["error"].as_str().map(str::to_owned)) {
             return Err(io::Error::other(e));
         }
-        let mut cmd: Vec<String> = ["server", "--disable", "traefik", "--tls-san", "127.0.0.1", "--tls-san", "localhost", "--write-kubeconfig-mode", "644"].map(String::from).to_vec();
+        let mut cmd: Vec<String> = SERVER_ARGS.map(String::from).to_vec();
         for name in cfg.tls_san.iter().filter(|n| valid_san(n)) {
             cmd.extend(["--tls-san".to_owned(), name.clone()]);
         }
@@ -320,6 +320,27 @@ fn start(use_context: bool) -> io::Result<()> {
     println!("Kubernetes is ready in {:.0} s, API on 127.0.0.1:{port}{moved}: kubectl --context {CONTEXT} get nodes", t0.elapsed().as_secs_f64());
     Ok(())
 }
+
+/// The k3s server's arguments, before the extra certificate names.
+/// One node: a pod evicted from it has nowhere to go, and nothing recreates a
+/// bare or operator-owned one. So a node that misses its lease for a while
+/// (the Mac asleep, or swapping hard enough to stall the datastore) keeps its
+/// pods for a day, not the default 300 s.
+const SERVER_ARGS: [&str; 13] = [
+    "server",
+    "--disable",
+    "traefik",
+    "--tls-san",
+    "127.0.0.1",
+    "--tls-san",
+    "localhost",
+    "--write-kubeconfig-mode",
+    "644",
+    "--kube-apiserver-arg",
+    "default-not-ready-toleration-seconds=86400",
+    "--kube-apiserver-arg",
+    "default-unreachable-toleration-seconds=86400",
+];
 
 /// k3s' own kubeconfig, from the node.
 fn k3s_yaml() -> io::Result<String> {
@@ -526,6 +547,16 @@ fn delete() -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn a_node_that_misses_its_lease_keeps_its_pods_for_a_day() {
+        for flag in ["default-not-ready-toleration-seconds=86400", "default-unreachable-toleration-seconds=86400"] {
+            let at = SERVER_ARGS.iter().position(|a| *a == flag).unwrap_or_else(|| panic!("no {flag}"));
+            assert_eq!(SERVER_ARGS[at - 1], "--kube-apiserver-arg");
+        }
+    }
+
     #[test]
     fn the_port_comes_from_the_binding_then_the_label() {
         let running = serde_json::json!({"NetworkSettings": {"Ports": {"6443/tcp": [{"HostIp": "127.0.0.1", "HostPort": "6444"}]}}, "Config": {"Labels": {"dev.kiri.k8s.port": "6450"}}});
